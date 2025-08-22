@@ -1,0 +1,485 @@
+# Copilot Bot with Invite, Points, Persistent Memory & Support Reply ⭐
+import os
+import re
+import time
+import json
+import random
+import requests
+from datetime import datetime
+from bs4 import BeautifulSoup
+import pytz
+
+# 🔐 پیکربندی ربات
+TOKEN = os.getenv("RUBIKA_BOT_TOKEN", "BAJHE0KWHIMGWENTXWDZTDZWOQYPWHARVSCMANQKAIJKPVPAFMPFGVWBRCTRLNEQ")  # ← توکن واقعی را اینجا یا در env بگذار
+BOT_USERNAME = "AI_chat_bot"
+BASE_URL = f"https://botapi.rubika.ir/v3/{TOKEN}/"
+
+# 🗂 فایل‌های ذخیره‌سازی
+POEMS_FILE = "hafez_poems.json"
+MEMORY_FILE = "memory.json"
+POINTS_FILE = "points.json"
+
+# 👑 شناسه‌ی مالک
+OWNER_ID = "b0IJu3T0Cwu0fbdc343cba54e43d2064"
+
+# 🗄 حافظه در زمان اجرا (پس از لود از دیسک)
+memory = {}       # { user_id: {"name","mood","msgs","owner_greeted","support_mode"} }
+points_data = {}  # { user_id: {"score","invited_by"} }
+
+# 🧩 گزینه‌های پنل
+panel_options = {
+    "1": "🔧 مدیریت ربات فعال شد. منتظر دستوراتت هستم!",
+    "2": "💰 موجودی شما: ۰ اعتبار. برای شارژ، عدد 5 رو بزن.",
+    "3": "📅 اشتراک فعلی: رایگان. برای ارتقاء، عدد 6 رو بفرست.",
+    "4": "📜 دریافت فال حافظ. «فال» بنویس.",
+    "5": "🔋 شارژ اعتبار: فعلاً غیرفعال، به زودی میاد!",
+    "6": "🛒 اشتراک ویژه فعال نیست. بزودی اضافه میشه!",
+    "7": "🔍 مشاهده اطلاعات حساب.",
+    "8": "🧑‍💻 پشتیبانی: پیام بفرست، پاسخ می‌دیم.",
+    "9": "📨 دعوت از دوستان - دریافت لینک دعوت و امتیاز",
+    "10": "🧩 چیستان - معماهای جالب و سرگرم کننده"
+}
+
+# 🎲 دیتابیس چیستان‌ها
+RIDDLES = [
+    {
+        "question": "چیست آن که روز می‌بینیم و شب ناپدید می‌شود؟",
+        "answer": "خورشید",
+        "hint": "منبع نور و گرمای زمین"
+    },
+    {
+        "question": "خانه‌ای دارم بدون در و پنجره، ساکنانم بی‌عدد و بی‌حساب، چیست؟",
+        "answer": "ماهی‌ها در دریا",
+        "hint": "محیطی آبی با موجودات فراوان"
+    },
+    {
+        "question": "از کوه بالا می‌رود، از کوه پایین می‌آید، اما از جای خود تکان نمی‌خورد. چیست؟",
+        "answer": "جاده",
+        "hint": "وسیله ارتباطی بین شهرها"
+    },
+    {
+        "question": "همه آن را دارند، ولی هیچکس نمی‌تواند آن را بدهد. چیست؟",
+        "answer": "سن",
+        "hint": "با گذشت زمان افزایش می‌یابد"
+    },
+    {
+        "question": "هر چه بیشتر بگیرم، بیشتر باقی می‌ماند. چیست؟",
+        "answer": "عکس",
+        "hint": "ثبت لحظات"
+    },
+    {
+        "question": "دارای شهر هست اما خانه ندارد، دارای جنگل است اما درخت ندارد، دارای دریا است اما آب ندارد. چیست؟",
+        "answer": "نقشه",
+        "hint": "برای مسیریابی استفاده می‌شود"
+    },
+    {
+        "question": "همه مرا می‌بینند، اما هیچکس مرا لمس نمی‌کند. اگر نامم را بگویی، ناپدید می‌شوم. چیستم؟",
+        "answer": "سکوت",
+        "hint": "در غیاب صدا ایجاد می‌شود"
+    },
+    {
+        "question": "از آب زاده می‌شوم، اما اگر در آب بیفتم می‌میرم. چیستم؟",
+        "answer": "نمک",
+        "hint": "برای طعم دادن به غذا استفاده می‌شود"
+    },
+    {
+        "question": "پر است از سوراخ اما هنوز آب را نگه می‌دارد. چیست؟",
+        "answer": "اسفنج",
+        "hint": "برای شستشو استفاده می‌شود"
+    },
+    {
+        "question": "هر چه بیشتر از آن بردارید، بزرگتر می‌شود. چیست؟",
+        "answer": "چاله",
+        "hint": "در زمین ایجاد می‌شود"
+    }
+]
+
+# ————— Utilities: persistent storage —————
+
+def load_json(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except:
+        pass
+    return default
+
+def save_json(path, data):
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except:
+        pass
+
+# ————— Poems cache —————
+
+def load_cached_poems():
+    if os.path.exists(POEMS_FILE):
+        with open(POEMS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+def save_cached_poems(poems):
+    with open(POEMS_FILE, "w", encoding="utf-8") as f:
+        json.dump(poems, f, ensure_ascii=False, indent=2)
+
+def fetch_hafez_poems():
+    cached = load_cached_poems()
+    if cached:
+        return cached
+    poems, headers = [], {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get("https://ganjoor.net/hafez/ghazal", headers=headers, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        links = soup.find_all("a", href=re.compile(r"^/hafez/ghazal/"))
+        for a in links[:60]:  # محدودیت برای جلوگیری از فشار زیاد
+            try:
+                p = requests.get("https://ganjoor.net" + a["href"], headers=headers, timeout=10)
+                sp = BeautifulSoup(p.text, "html.parser")
+                div = sp.select_one("div.poem")
+                if div:
+                    poems.append(div.get_text("\n", strip=True))
+                time.sleep(0.25)
+            except:
+                pass
+    except:
+        pass
+    if not poems:
+        poems = [
+            "الا یا ایها الساقی ادر کاساً و ناولها\nکه عشق آسان نمود اول ولی افتاد مشکل‌ها",
+            "دوش دیدم که ملائک در میخانه زدند\nگل آدم بسرشتند و به پیمانه زدند"
+        ]
+    save_cached_poems(poems)
+    return poems
+
+# ————— Helpers —————
+
+def get_time_greeting():
+    now = datetime.now(pytz.timezone("Asia/Tehran"))
+    h, wd = now.hour, now.weekday()
+    if 6 <= h < 12: g = "صبح بخیر ☀️"
+    elif 12 <= h < 18: g = "ظهر بخیر ☕"
+    elif 18 <= h < 23: g = "شب بخیر ✨"
+    else: g = "نیمه‌شب بخیر 🌙"
+    if wd == 4: g += " فردا جمعه‌ست! 😌"
+    elif wd == 5: g += " جمعه‌ست! استراحت کن 😊"
+    return g
+
+def get_updates(offset_id=None, limit=50):
+    params = {"limit": limit}
+    if offset_id: params["offset_id"] = offset_id
+    try:
+        r = requests.post(BASE_URL + "getUpdates", json=params, timeout=10)
+        data = r.json().get("data", {})
+        return data.get("updates", []), data.get("next_offset_id")
+    except:
+        return [], None
+
+def send_message(chat_id, text):
+    try:
+        return requests.post(
+            BASE_URL + "sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10
+        ).status_code == 200
+    except:
+        return False
+
+# ————— Core logic —————
+
+def copilot_response(text, user_id, poems):
+    text_raw = text or ""
+    text = text_raw.strip().lower()
+    greet = get_time_greeting()
+
+    # init user memory & points
+    if user_id not in memory:
+        memory[user_id] = {
+            "name": "دوست من",
+            "mood": "neutral",
+            "msgs": 0,
+            "owner_greeted": False,
+            "support_mode": False,
+            "current_riddle": None
+        }
+    if user_id not in points_data:
+        points_data[user_id] = {"score": 0, "invited_by": None}
+
+    # one-time owner welcome
+    if user_id == OWNER_ID and not memory[user_id]["owner_greeted"]:
+        memory[user_id]["owner_greeted"] = True
+        return "👑 سلام امیرعلی عزیز! شما مالک این ربات هستید. چه خدمتی از دست من برمیاد؟"
+
+    user = memory[user_id]
+    user["msgs"] += 1
+    name, mood = user["name"], user["mood"]
+    score = points_data[user_id]["score"]
+
+    # support mode: forward user msgs to owner
+    if user["support_mode"]:
+        if text in ("خروج", "برگشت", "منو"):
+            user["support_mode"] = False
+            return "🔙 به منوی اصلی برگشتید!"
+        send_message(OWNER_ID, f"📩 پیام پشتیبانی از {name} ({user_id}):\n\n{text_raw}")
+        return "✅ پیام شما ارسال شد. برای خروج «خروج» بنویسید."
+
+    # mood detection
+    if any(w in text for w in ["خسته", "ناراحت", "غم", "ناامید"]):
+        user["mood"] = "sad"
+    elif any(w in text for w in ["خوشحال", "باحال", "عالی", "خوبه"]):
+        user["mood"] = "happy"
+
+    # set name
+    if text.startswith("اسم من"):
+        parts = text_raw.strip().split()
+        if len(parts) >= 3:
+            user["name"] = parts[-1].strip()
+            return f"🎉 سلام {user['name']}! از این به بعد اینطوری صدات می‌کنم."
+        return "لطفاً بنویس «اسم من [نام]»."
+
+    # invite link
+    if text in ("9", "دعوت", "📨"):
+        link = f"https://rubika.ir/{BOT_USERNAME}?start={user_id}"
+        return (
+            f"📨 {name} عزیز! لینک دعوت تو:\n{link}\n\n"
+            f"هر کسی با این لینک بیاد، هر دو ۱ امتیاز می‌گیرین!\n"
+            f"امتیاز شما: {score} ⭐"
+        )
+
+    # panel menu
+    if text == "پنل":
+        items = []
+        for k, v in panel_options.items():
+            parts = v.split()
+            if len(parts) >= 2:
+                emoji = parts[0]
+                label = parts[1]
+                rest = " ".join(parts[2:]) if len(parts) > 2 else ""
+                items.append(f"{k}️⃣ {emoji} {label} - {rest}")
+            else:
+                items.append(f"{k}️⃣ {v}")
+        menu = "\n".join(items)
+        return f"🔸 منوی پنل:\n\n{menu}\n\nبرای انتخاب عدد یا متن گزینه رو بفرست."
+
+    # enter support
+    if text in ("8", "پشتیبانی", "🧑‍💻"):
+        user["support_mode"] = True
+        return (
+            "📩 وارد بخش پشتیبانی شدی.\n"
+            "پیام‌هات ارسال میشه به مالک.\n"
+            "برای خروج «خروج» بنویس."
+        )
+
+    # چیستان
+    if "چیستان" in text or text == "10" or "معما" in text:
+        riddle = random.choice(RIDDLES)
+        user["current_riddle"] = {
+            "answer": riddle["answer"],
+            "hint_used": False,
+            "question": riddle["question"]
+        }
+        return (
+            f"🤔 چیستان:\n\n{riddle['question']}\n\n"
+            "• برای پاسخ دادن، جواب خود را بنویس\n"
+            "• برای راهنما بنویس «راهنما»\n"
+            "• اگر نمی‌دانی بنویس «نمیدونم»\n"
+            "• برای خروج بنویس «خروج»"
+        )
+    
+    # نمایش راهنما
+    if text == "راهنما" and user.get("current_riddle"):
+        if not user["current_riddle"]["hint_used"]:
+            user["current_riddle"]["hint_used"] = True
+            hint = next(r["hint"] for r in RIDDLES if r["question"] == user["current_riddle"]["question"])
+            return f"💡 راهنما: {hint}\n\nمی‌خواهی جواب را ببینی؟ بنویس «جواب»"
+        else:
+            return "⚠️ شما قبلاً از راهنما استفاده کرده‌اید!"
+
+    # بررسی پاسخ چیستان
+    if user.get("current_riddle"):
+        correct_answer = user["current_riddle"]["answer"].lower()
+        
+        if text.lower() == correct_answer:
+            points = 2 if not user["current_riddle"]["hint_used"] else 1
+            points_data[user_id]["score"] += points
+            response = (
+                f"🎉 آفرین {name}! پاسخ شما درست بود!\n"
+                f"امتیاز شما {'+' + str(points)} ⭐ (جمع: {points_data[user_id]['score']})"
+            )
+            if user["current_riddle"]["hint_used"]:
+                response += "\n(امتیاز کاهش یافت چون از راهنما استفاده کردی)"
+            user.pop("current_riddle")
+            return response
+            
+        elif text == "نمیدونم":
+            answer = user.pop("current_riddle")["answer"]
+            return f"☹️ پاسخ صحیح: {answer}\n\nبرای چیستان جدید بنویس «چیستان»"
+            
+        elif text == "راهنما":
+            pass  # قبلاً پردازش شده
+            
+        elif text in ("خروج", "بازگشت", "منو"):
+            user.pop("current_riddle")
+            return "🔙 از حالت چیستان خارج شدید. برای دیدن منو «پنل» بنویسید."
+            
+        else:
+            return (
+                "پاسخ شما نادرست است! گزینه‌های موجود:\n"
+                "• برای راهنما بنویس «راهنما»\n"
+                "• برای تسلیم شدن بنویس «نمیدونم»\n"
+                "• برای خروج بنویس «خروج»"
+            )
+
+    # other panel options (except invite 9)
+    for k, v in panel_options.items():
+        if k == "9":
+            continue
+        parts = v.split()
+        emoji = parts[0] if parts else ""
+        label = parts[1] if len(parts) > 1 else ""
+        if text in (k, emoji, label):
+            return f"✅ {v}"
+
+    # hafez
+    if "فال حافظ" in text or text == "فال":
+        poem = random.choice(poems)
+        return f"✨ فال حافظ برای {name}:\n\n{poem}\n\n🔹 تعبیر: زندگی پر از زیبایی‌ست."
+
+    # info
+    if "اطلاعات" in text:
+        return (
+            f"📋 اطلاعات شما:\n"
+            f"• نام: {name}\n"
+            f"• شناسه: {user_id}\n"
+            f"• پیام‌ها: {user['msgs']}\n"
+            f"• مود: {user['mood']}\n"
+            f"• امتیاز: {score} ⭐"
+        )
+
+    # time & date
+    if any(w in text for w in ["ساعت", "تاریخ", "امروز"]):
+        now = datetime.now(pytz.timezone("Asia/Tehran"))
+        return f"📅 امروز {now.strftime('%Y/%m/%d')}، ساعت {now.strftime('%H:%M')}."
+
+    # greetings
+    if any(w in text for w in ["سلام", "چطوری", "حال"]):
+        resp = random.choice([
+            f"{greet} {name}! چه خبر؟",
+            f"هی {name}! خوب هستی؟"
+        ])
+        sugg = random.choice([
+            "📜 برای فال «فال»",
+            "😄 برای شوخی «شوخی»",
+            "🧠 برای دانستنی «دانستنی»",
+            "🤔 برای چیستان «چیستان»"
+        ])
+        return f"{resp}\n{sugg}"
+
+    # jokes & trivia & goodbye & mood
+    if "شوخی" in text:
+        return random.choice([
+            "یه روز ربات عاشق شد... ولی کرشش بات دیگه‌ای بود! 💔",
+            "حسادت ندارم... مگر اینکه با بات دیگه‌ای صحبت کنی! 🤖"
+        ])
+    if "دانستنی" in text:
+        return random.choice([
+            "فیل‌ها نمی‌تونن بپرن ولی حافظه‌شون خارق‌العاده‌ست! �",
+            "غروب مریخ آبیه، نه قرمز! 🚀"
+        ])
+    if any(w in text for w in ["خداحافظ", "فعلاً", "بای"]):
+        return f"فعلاً {name}! منتظرت می‌مونم 💬"
+    if user["mood"] == "sad":
+        return random.choice([
+            f"{greet} {name}... لبخند بزن! 🎶",
+            "من اینجام برای حرف زدن 💙"
+        ])
+
+    return f"{name} جان، هر سوالی داشتی من در خدمتم! 🤝"
+
+# ————— Main loop —————
+
+def main():
+    if not TOKEN or TOKEN == "PASTE-YOUR-TOKEN-HERE":
+        print("⚠️ لطفاً متغیر محیطی RUBIKA_BOT_TOKEN را تنظیم کنید یا TOKEN را در کد جایگزین کنید.")
+    else:
+        print("✅ توکن بارگذاری شد.")
+
+    # لود داده‌های دائمی
+    global memory, points_data
+    memory = load_json(MEMORY_FILE, {})
+    points_data = load_json(POINTS_FILE, {})
+
+    print("🚀 ربات Copilot اجرا شد")
+    poems = fetch_hafez_poems()
+    last_offset = None
+    processed = set()
+    start_time = time.time()
+
+    while True:
+        updates, next_off = get_updates(last_offset)
+        for upd in updates:
+            if upd.get("type") != "NewMessage":
+                continue
+
+            msg = upd.get("new_message", {})
+            chat_id = upd.get("chat_id") or msg.get("chat_id")
+            if not chat_id:
+                continue
+
+            text = (msg.get("text") or "").strip()
+            msg_id = str(msg.get("message_id"))
+            ts = int(msg.get("time", 0))
+
+            if ts <= start_time or msg_id in processed:
+                continue
+            processed.add(msg_id)
+
+            user_id = str(chat_id)
+
+            # 👑 Owner reply command
+            if user_id == OWNER_ID and text.startswith("/reply "):
+                parts = text.split(" ", 2)
+                if len(parts) < 3:
+                    send_message(chat_id, "❗ فرمت: /reply شناسه متن پاسخ")
+                else:
+                    target, resp = parts[1], parts[2]
+                    send_message(target, f"📩 پاسخ پشتیبانی:\n{resp}")
+                    send_message(chat_id, "✅ پاسخ ارسال شد.")
+                continue
+
+            # ثبت دعوت و امتیاز اولین پیام
+            if user_id not in points_data:
+                if text.startswith("/start") and " " in text:
+                    inv = text.split(" ", 1)[1].strip()
+                    points_data[user_id] = {"score": 1, "invited_by": inv}
+                    if inv in points_data:
+                        points_data[inv]["score"] = points_data.get(inv, {}).get("score", 0) + 1
+                    else:
+                        points_data[inv] = {"score": 1, "invited_by": None}
+                    save_json(POINTS_FILE, points_data)
+                    send_message(chat_id, "🎉 خوش‌اومدی! هر دو ۱ امتیاز گرفتید ⭐")
+                    continue
+                else:
+                    points_data[user_id] = {"score": 0, "invited_by": None}
+                    save_json(POINTS_FILE, points_data)
+
+            # پاسخ معمولی
+            reply = copilot_response(text, user_id, poems)
+            send_message(chat_id, reply)
+
+            # ذخیره تغییرات حافظه و امتیازها پس از هر پاسخ
+            save_json(MEMORY_FILE, memory)
+            save_json(POINTS_FILE, points_data)
+
+        if next_off and next_off != last_offset:
+            last_offset = next_off
+        time.sleep(0.5)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("⛔️ ربات متوقف شد")
